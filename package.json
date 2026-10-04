@@ -1,0 +1,13 @@
+{
+  "name": "strategie-karting",
+  "version": "1.0.0",
+  "description": "Appli de stratégie d'endurance karting : chrono de la piste, rotation des karts, écran pilote et radio",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node test/test.mjs"
+  },
+  "engines": { "node": ">=22" },
+  "license": "MIT"
+}

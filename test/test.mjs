@@ -1,0 +1,45 @@
+// Tests du serveur : node test/test.mjs
+import { spawn } from 'node:child_process';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+const PORT = 3900 + Math.floor(Math.random() * 90), BASE = `http://127.0.0.1:${PORT}`;
+const tmp = fs.mkdtempSync('/tmp/karting-');
+const srv = spawn(process.execPath, ['server.mjs'], { env: { ...process.env, PORT, DATA_FILE: tmp + '/rooms.json' }, stdio: ['ignore', 'pipe', 'inherit'] });
+await new Promise(r => srv.stdout.on('data', d => { if (String(d).includes('prête')) r(); }));
+const j = async (method, path, body, key) => { const r = await fetch(BASE + path, { method, headers: { 'content-type': 'application/json', ...(key ? { 'x-key': key } : {}) }, body: body ? JSON.stringify(body) : undefined }); return { status: r.status, body: await r.json().catch(() => null) }; };
+let ok = 0; const t = async (name, fn) => { try { await fn(); ok++; console.log('OK ', name); } catch (e) { console.log('XX ', name, e.message); process.exitCode = 1; } };
+let room, key;
+await t('page servie', async () => { const r = await fetch(BASE + '/'); assert.equal(r.status, 200); assert.match(await r.text(), /Stratégie endurance karting/); });
+await t('pas de traversée de dossier', async () => { const r = await fetch(BASE + '/..%2fserver.mjs'); assert.notEqual(r.status, 200); });
+await t('création de salle', async () => { const r = await j('POST', '/api/rooms'); assert.equal(r.status, 201); room = r.body.room; key = r.body.key; assert.match(room, /^[A-Z0-9]{6}$/); });
+await t('clé manager reconnue, pilote sans clé', async () => { assert.equal((await j('GET', `/api/rooms/${room}`, null, key)).body.manager, true); assert.equal((await j('GET', `/api/rooms/${room}`)).body.manager, false); assert.equal((await j('GET', `/api/rooms/${room}`, null, 'mauvaise')).body.manager, false); });
+await t('salle inconnue : 404', async () => assert.equal((await j('GET', '/api/rooms/ZZZZZZ')).status, 404));
+await t('message refusé sans clé', async () => assert.equal((await j('POST', `/api/rooms/${room}/radio`, { text: 'test' })).status, 401));
+await t('temps réel : état, message, réponse', async () => {
+  const ctl = new AbortController(), got = [];
+  const res = await fetch(`${BASE}/api/rooms/${room}/events`, { signal: ctl.signal });
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  (async () => { try { for (;;) { const { value, done } = await reader.read(); if (done) break; got.push(dec.decode(value)); } } catch (e) { } })();
+  await j('PUT', `/api/rooms/${room}/live`, { raceId: 'c1', position: 3 }, key);
+  const m = await j('POST', `/api/rooms/${room}/radio`, { raceId: 'c1', kind: 'BOX', text: 'Rentre ce tour' }, key);
+  assert.equal(m.status, 201);
+  assert.equal((await j('POST', `/api/rooms/${room}/replies`, { raceId: 'c1', msgId: m.body.id, text: 'Reçu', driver: 1 })).status, 201);
+  await new Promise(r => setTimeout(r, 300)); ctl.abort();
+  const all = got.join('');
+  assert.match(all, /event: hello/); assert.match(all, /"position":3/); assert.match(all, /Rentre ce tour/); assert.match(all, /Reçu/);
+});
+await t('chrono : adresse hors liste refusée', async () => assert.equal((await j('POST', `/api/rooms/${room}/timing`, { source: 'apex', url: 'http://169.254.169.254/' }, key)).status, 400));
+await t('chrono : démo et instantané', async () => {
+  assert.equal((await j('POST', `/api/rooms/${room}/timing`, { source: 'demo', speed: 50 }, key)).status, 200);
+  await new Promise(r => setTimeout(r, 4000));
+  const s = await j('GET', `/api/rooms/${room}/timing?since=0`, null, key);
+  assert.equal(s.body.rows.length, 8); assert.ok(s.body.events.some(e => e.type === 'LAP'), 'tours reçus');
+  const s2 = await j('GET', `/api/rooms/${room}/timing?since=${s.body.seq}`, null, key);
+  assert.ok(s2.body.events.every(e => e.seq > s.body.seq));
+});
+await t('chrono réservé au team manager', async () => assert.equal((await j('GET', `/api/rooms/${room}/timing`)).status, 401));
+await t('message vide refusé', async () => assert.equal((await j('POST', `/api/rooms/${room}/radio`, { text: '  ' }, key)).status, 400));
+srv.kill('SIGTERM'); await new Promise(r => setTimeout(r, 300));
+await t('salles sauvegardées à l\'arrêt', async () => { const d = JSON.parse(fs.readFileSync(tmp + '/rooms.json', 'utf8')); assert.ok(d.some(r => r.code === room && r.radio.length === 1)); });
+console.log(`${ok} tests réussis`);
+process.exit();
